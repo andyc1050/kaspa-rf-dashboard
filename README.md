@@ -75,15 +75,16 @@ https://andyc1050.github.io/kaspa-rf-dashboard/
 
 ## Data Bootstrap
 
-The repo includes a compressed bootstrap seed at:
+The repo includes a compressed bootstrap seed split into small text chunks:
 
 ```text
-data/kaspa_daily_ohlcv.seed.csv.gz.b64
+data/kaspa_daily_ohlcv.seed.csv.gz.b64.d/part-*.txt
 ```
 
-On the first run, `update_kaspa_data.py` uses that seed to create
+On the first run, `update_kaspa_data.py` reassembles those chunks to create
 `data/kaspa_daily_ohlcv.csv`, then appends new completed daily candles from
-CoinGecko.
+CoinGecko. A single local compressed seed file is also supported, but it is
+ignored by git to keep the public repo tidy.
 
 ## Outputs
 
