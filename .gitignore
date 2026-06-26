@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+outputs/
+site/
+tmp/
+server_stdout.log
+server_stderr.log
