@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_SEED = Path(r"C:\Users\Andy Chi\Desktop\KASPA_Historical_Data.xlsx")
 DEFAULT_OUTPUT = ROOT / "data" / "kaspa_daily_ohlcv.csv"
 DEFAULT_COMPRESSED_SEED = ROOT / "data" / "kaspa_daily_ohlcv.seed.csv.gz.b64"
+DEFAULT_COMPRESSED_SEED_CHUNKS = ROOT / "data" / "kaspa_daily_ohlcv.seed.csv.gz.b64.d"
 DEFAULT_STATUS = ROOT / "outputs" / "kaspa_data_status.json"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
@@ -39,8 +40,8 @@ def latest_complete_utc_date() -> pd.Timestamp:
 def load_existing_or_seed(output_path: Path, seed_path: Path) -> pd.DataFrame:
     if output_path.exists():
         df = pd.read_csv(output_path)
-    elif DEFAULT_COMPRESSED_SEED.exists():
-        raw = base64.b64decode(DEFAULT_COMPRESSED_SEED.read_text(encoding="ascii"))
+    elif DEFAULT_COMPRESSED_SEED.exists() or DEFAULT_COMPRESSED_SEED_CHUNKS.exists():
+        raw = base64.b64decode(read_compressed_seed_text())
         df = pd.read_csv(io.BytesIO(gzip.decompress(raw)))
     else:
         df = pd.read_excel(seed_path, sheet_name="Historical Data")
@@ -55,6 +56,18 @@ def load_existing_or_seed(output_path: Path, seed_path: Path) -> pd.DataFrame:
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna().sort_values("Date").drop_duplicates("Date", keep="last")
+
+
+def read_compressed_seed_text() -> str:
+    if DEFAULT_COMPRESSED_SEED.exists():
+        return DEFAULT_COMPRESSED_SEED.read_text(encoding="ascii").strip()
+
+    parts = sorted(DEFAULT_COMPRESSED_SEED_CHUNKS.glob("part-*.txt"))
+    if not parts:
+        raise FileNotFoundError(
+            f"No compressed seed or seed chunks found under {DEFAULT_COMPRESSED_SEED_CHUNKS}"
+        )
+    return "".join(part.read_text(encoding="ascii").strip() for part in parts)
 
 
 def coingecko_get(path: str, params: dict[str, Any]) -> Any:
