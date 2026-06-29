@@ -28,6 +28,7 @@ DEFAULT_COMPRESSED_SEED = ROOT / "data" / "kaspa_daily_ohlcv.seed.csv.gz.b64"
 DEFAULT_COMPRESSED_SEED_CHUNKS = ROOT / "data" / "kaspa_daily_ohlcv.seed.csv.gz.b64.d"
 DEFAULT_STATUS = ROOT / "outputs" / "kaspa_data_status.json"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+COINGECKO_OHLC_DAY_BUCKETS = (1, 7, 14, 30, 90, 180, 365)
 
 
 def latest_complete_utc_date() -> pd.Timestamp:
@@ -84,12 +85,21 @@ def coingecko_get(path: str, params: dict[str, Any]) -> Any:
         return json.loads(response.read().decode("utf-8"))
 
 
+def coingecko_ohlc_days(days: int) -> int:
+    """CoinGecko OHLC accepts fixed day buckets, not arbitrary windows."""
+    clamped_days = max(1, min(days, COINGECKO_OHLC_DAY_BUCKETS[-1]))
+    for bucket in COINGECKO_OHLC_DAY_BUCKETS:
+        if clamped_days <= bucket:
+            return bucket
+    return COINGECKO_OHLC_DAY_BUCKETS[-1]
+
+
 def fetch_recent_ohlc(days: int) -> pd.DataFrame:
     rows = coingecko_get(
         "/coins/kaspa/ohlc",
         {
             "vs_currency": "usd",
-            "days": str(max(1, min(days, 365))),
+            "days": str(coingecko_ohlc_days(days)),
             "precision": "full",
         },
     )
