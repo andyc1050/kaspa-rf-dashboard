@@ -12,6 +12,9 @@ signal visualizer intended to make the model behavior easier to inspect.
   pandas, and numpy.
 - Runs a walk-forward backtest with retraining every 30 days.
 - Compares the model strategy against buy-and-hold.
+- Explains the latest signal with confidence bands, market regime, and
+  top feature-context readings.
+- Publishes a trade journal and daily signal archive for auditability.
 - Builds a static HTML dashboard for GitHub Pages.
 - Runs automatically every day with GitHub Actions.
 
@@ -91,5 +94,7 @@ ignored by git to keep the public repo tidy.
 - `outputs/kaspa_rf_metrics.json`
 - `outputs/kaspa_rf_equity_curve.csv`
 - `outputs/kaspa_rf_feature_importance.csv`
+- `outputs/kaspa_rf_trade_journal.csv`
+- `outputs/kaspa_rf_daily_signal_archive.csv`
 - `outputs/kaspa_rf_dashboard.html`
 - `site/index.html` for GitHub Pages deployment

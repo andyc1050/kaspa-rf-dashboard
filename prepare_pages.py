@@ -23,6 +23,11 @@ def main() -> None:
     (SITE / ".nojekyll").write_text("", encoding="utf-8")
     copy_if_exists(OUTPUTS / "kaspa_rf_dashboard.html", SITE / "index.html")
     copy_if_exists(OUTPUTS / "kaspa_rf_metrics.json", SITE / "assets" / "kaspa_rf_metrics.json")
+    copy_if_exists(OUTPUTS / "kaspa_rf_trade_journal.csv", SITE / "assets" / "kaspa_rf_trade_journal.csv")
+    copy_if_exists(
+        OUTPUTS / "kaspa_rf_daily_signal_archive.csv",
+        SITE / "assets" / "kaspa_rf_daily_signal_archive.csv",
+    )
     copy_if_exists(OUTPUTS / "kaspa_data_status.json", SITE / "assets" / "kaspa_data_status.json")
     copy_if_exists(ROOT / "data" / "kaspa_daily_ohlcv.csv", SITE / "assets" / "kaspa_daily_ohlcv.csv")
 

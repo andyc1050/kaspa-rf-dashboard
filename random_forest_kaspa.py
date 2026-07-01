@@ -22,6 +22,50 @@ DEFAULT_INPUT = Path(r"C:\Users\Andy Chi\Desktop\KASPA_Historical_Data.xlsx")
 DEFAULT_CANONICAL_CSV = Path(__file__).resolve().parent / "data" / "kaspa_daily_ohlcv.csv"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 
+FEATURE_LABELS = {
+    "close_position": "Close location in daily range",
+    "range_pct": "Daily range",
+    "atr_14_pct": "14-day ATR",
+    "return_2d": "2-day return",
+    "return_3d": "3-day return",
+    "return_5d": "5-day return",
+    "return_30d": "30-day return",
+    "return_90d": "90-day return",
+    "log_return_1d": "1-day log return",
+    "close_vs_sma_5d": "Close vs 5-day SMA",
+    "close_vs_sma_20d": "Close vs 20-day SMA",
+    "close_vs_sma_50d": "Close vs 50-day SMA",
+    "close_vs_sma_200d": "Close vs 200-day SMA",
+    "body_pct": "Candle body",
+    "volatility_30d": "30-day volatility",
+    "volatility_60d": "60-day volatility",
+    "volatility_5d": "5-day volatility",
+    "volume_ratio_30d": "Volume vs 30-day average",
+    "rsi_14": "14-day RSI",
+}
+
+FEATURE_NOTES = {
+    "close_position": "Shows whether KAS closed near the top or bottom of its daily candle.",
+    "range_pct": "Measures intraday movement relative to closing price.",
+    "atr_14_pct": "Captures the current volatility regime using average true range.",
+    "return_2d": "Short-term momentum input.",
+    "return_3d": "Short-term momentum input.",
+    "return_5d": "One-week momentum input.",
+    "return_30d": "Medium-term trend input.",
+    "return_90d": "Quarterly trend input.",
+    "log_return_1d": "Latest daily price impulse.",
+    "close_vs_sma_5d": "Short-term distance from trend.",
+    "close_vs_sma_20d": "One-month distance from trend.",
+    "close_vs_sma_50d": "Intermediate trend distance.",
+    "close_vs_sma_200d": "Long-term trend distance.",
+    "body_pct": "Direction and size of the daily candle body.",
+    "volatility_30d": "Realized volatility over the last month.",
+    "volatility_60d": "Realized volatility over the last two months.",
+    "volatility_5d": "Very recent realized volatility.",
+    "volume_ratio_30d": "Liquidity/participation versus recent average.",
+    "rsi_14": "Momentum oscillator used as a non-linear context feature.",
+}
+
 
 @dataclass
 class TreeNode:
@@ -486,6 +530,228 @@ def threshold_sensitivity(predictions: pd.DataFrame, fee_bps: float) -> pd.DataF
     return pd.DataFrame(rows).sort_values("sharpe_0rf", ascending=False)
 
 
+def standalone_action(prob_up: float, enter_threshold: float, exit_threshold: float) -> str:
+    if prob_up >= enter_threshold:
+        return "LONG"
+    if prob_up <= exit_threshold:
+        return "CASH"
+    return "HOLD_EXISTING_POSITION"
+
+
+def confidence_band(prob_up: float, enter_threshold: float, exit_threshold: float) -> dict[str, float | str]:
+    action = standalone_action(prob_up, enter_threshold, exit_threshold)
+    if action == "LONG":
+        margin = prob_up - enter_threshold
+        label = "Strong Long" if margin >= 0.10 else "Weak Long"
+    elif action == "CASH":
+        margin = exit_threshold - prob_up
+        label = "Strong Cash" if margin >= 0.10 else "Weak Cash"
+    else:
+        midpoint = (enter_threshold + exit_threshold) / 2.0
+        margin = -abs(prob_up - midpoint)
+        label = "Neutral / Hold Zone"
+
+    return {
+        "label": label,
+        "action": action,
+        "probability": prob_up,
+        "meter_pct": prob_up,
+        "distance_from_entry": prob_up - enter_threshold,
+        "distance_from_exit": prob_up - exit_threshold,
+        "margin": margin,
+    }
+
+
+def percentile_rank(series: pd.Series, value: float) -> float:
+    clean = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if clean.empty or not np.isfinite(value):
+        return float("nan")
+    return float((clean <= value).mean())
+
+
+def percentile_reading(percentile: float) -> str:
+    if not np.isfinite(percentile):
+        return "Unknown"
+    if percentile >= 0.80:
+        return "Elevated"
+    if percentile <= 0.20:
+        return "Depressed"
+    return "Normal"
+
+
+def latest_feature_context(
+    live_df: pd.DataFrame,
+    reference_df: pd.DataFrame,
+    importances: pd.DataFrame,
+    *,
+    limit: int = 8,
+) -> list[dict[str, float | str]]:
+    latest = live_df.iloc[-1]
+    rows: list[dict[str, float | str]] = []
+    for _, item in importances.head(limit).iterrows():
+        feature = str(item["feature"])
+        if feature not in live_df.columns:
+            continue
+        value = float(latest[feature])
+        percentile = percentile_rank(reference_df[feature], value)
+        rows.append(
+            {
+                "feature": feature,
+                "label": FEATURE_LABELS.get(feature, feature.replace("_", " ").title()),
+                "value": value,
+                "importance": float(item["importance"]),
+                "percentile": percentile,
+                "reading": percentile_reading(percentile),
+                "note": FEATURE_NOTES.get(feature, "Current feature reading relative to history."),
+            }
+        )
+    return rows
+
+
+def classify_market_regime(row: pd.Series, reference_df: pd.DataFrame) -> dict[str, float | str]:
+    vol = float(row.get("volatility_30d", np.nan))
+    vol_pct = percentile_rank(reference_df["volatility_30d"], vol) if "volatility_30d" in reference_df else float("nan")
+    volume_ratio = float(row.get("volume_ratio_30d", np.nan))
+    close_vs_50 = float(row.get("close_vs_sma_50d", np.nan))
+    close_vs_200 = float(row.get("close_vs_sma_200d", np.nan))
+    return_30d = float(row.get("return_30d", np.nan))
+
+    tags: list[str] = []
+    if np.isfinite(vol_pct):
+        if vol_pct >= 0.80:
+            tags.append("High Volatility")
+        elif vol_pct <= 0.25:
+            tags.append("Low Volatility")
+    if np.isfinite(volume_ratio) and volume_ratio < 0.70:
+        tags.append("Low Liquidity")
+
+    trend_up = close_vs_50 > 0 and close_vs_200 > 0 and return_30d > 0
+    trend_down = close_vs_50 < 0 and close_vs_200 < 0 and return_30d < 0
+    trend_strength = max(abs(close_vs_50), abs(return_30d)) if np.isfinite(close_vs_50) and np.isfinite(return_30d) else float("nan")
+
+    if trend_up:
+        label = "Trending Up"
+    elif trend_down:
+        label = "Trending Down"
+    elif np.isfinite(trend_strength) and trend_strength < 0.08:
+        label = "Choppy"
+    elif np.isfinite(vol_pct) and vol_pct >= 0.75:
+        label = "High Volatility"
+    else:
+        label = "Mixed"
+
+    if not tags:
+        tags.append("Normal Liquidity")
+
+    return {
+        "label": label,
+        "tags": ", ".join(tags),
+        "volatility_percentile": vol_pct,
+        "volume_ratio_30d": volume_ratio,
+        "close_vs_sma_50d": close_vs_50,
+        "close_vs_sma_200d": close_vs_200,
+        "return_30d": return_30d,
+    }
+
+
+def apply_regime_columns(df: pd.DataFrame, reference_df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    regimes = [classify_market_regime(row, reference_df) for _, row in out.iterrows()]
+    out["market_regime"] = [str(item["label"]) for item in regimes]
+    out["regime_tags"] = [str(item["tags"]) for item in regimes]
+    out["volatility_percentile"] = [float(item["volatility_percentile"]) for item in regimes]
+    return out
+
+
+def build_daily_signal_archive(
+    bt: pd.DataFrame,
+    reference_df: pd.DataFrame,
+    *,
+    enter_threshold: float,
+    exit_threshold: float,
+) -> pd.DataFrame:
+    archive = apply_regime_columns(bt, reference_df)
+    archive["standalone_signal"] = archive["prob_up"].apply(
+        lambda value: standalone_action(float(value), enter_threshold, exit_threshold)
+    )
+    bands = [
+        confidence_band(float(prob), enter_threshold, exit_threshold)
+        for prob in archive["prob_up"]
+    ]
+    archive["confidence_label"] = [str(item["label"]) for item in bands]
+    archive["next_day_result"] = np.where(archive["next_return"] > 0, "UP", "DOWN")
+    archive["model_was_right"] = archive["prediction"].astype(int) == archive["target_up"].astype(int)
+    archive["position_state"] = np.where(archive["position"].astype(int) == 1, "LONG", "CASH")
+    return archive[
+        [
+            "Date",
+            "Close",
+            "prob_up",
+            "standalone_signal",
+            "confidence_label",
+            "position_state",
+            "market_regime",
+            "regime_tags",
+            "next_return",
+            "next_day_result",
+            "model_was_right",
+            "strategy_return",
+            "strategy_equity",
+            "buyhold_equity",
+        ]
+    ].copy()
+
+
+def build_trade_journal(bt: pd.DataFrame, *, fee_bps: float) -> pd.DataFrame:
+    position = bt["position"].astype(int)
+    changes = position.diff().fillna(position)
+    fee = fee_bps / 10_000.0
+    rows: list[dict[str, float | int | str | bool]] = []
+    entry_idx: int | None = None
+
+    for idx, change in enumerate(changes):
+        if int(change) == 1 and entry_idx is None:
+            entry_idx = idx
+        is_exit = int(change) == -1
+        is_final_open = entry_idx is not None and idx == len(bt) - 1 and position.iloc[idx] == 1
+        if entry_idx is None or not (is_exit or is_final_open):
+            continue
+
+        exit_idx = idx
+        trade = bt.iloc[entry_idx : exit_idx + 1].copy()
+        entry = bt.iloc[entry_idx]
+        exit_ = bt.iloc[exit_idx]
+        close_path = trade["Close"].to_numpy(dtype=float)
+        running_max = np.maximum.accumulate(close_path)
+        trade_drawdown = float(np.min(close_path / running_max - 1.0))
+        gross_return = float(exit_["Close"] / entry["Close"] - 1.0)
+        net_return = float((1.0 + trade["strategy_return"]).prod() - 1.0)
+        holding_days = max(1, int((pd.Timestamp(exit_["Date"]) - pd.Timestamp(entry["Date"])).days))
+
+        rows.append(
+            {
+                "trade_id": len(rows) + 1,
+                "entry_date": str(pd.Timestamp(entry["Date"]).date()),
+                "exit_date": "" if is_final_open else str(pd.Timestamp(exit_["Date"]).date()),
+                "status": "OPEN" if is_final_open else "CLOSED",
+                "holding_days": holding_days,
+                "entry_price": float(entry["Close"]),
+                "exit_price": float(exit_["Close"]),
+                "entry_probability": float(entry["prob_up"]),
+                "exit_probability": float(exit_["prob_up"]),
+                "gross_return": gross_return,
+                "net_return_after_fees": net_return,
+                "max_drawdown": trade_drawdown,
+                "fees_estimated": fee if is_final_open else fee * 2.0,
+                "winning_trade": bool(net_return > 0),
+            }
+        )
+
+        entry_idx = None if is_exit else entry_idx
+
+    return pd.DataFrame(rows)
+
+
 def latest_model_signal(
     model_df: pd.DataFrame,
     live_df: pd.DataFrame,
@@ -497,7 +763,7 @@ def latest_model_signal(
     enter_threshold: float,
     exit_threshold: float,
     random_state: int,
-) -> dict[str, float | str]:
+) -> dict[str, object]:
     latest = live_df.iloc[[-1]].copy()
     x_train_raw = model_df[feature_cols].to_numpy(dtype=float)
     y_train = model_df["target_up"].to_numpy(dtype=int)
@@ -513,18 +779,17 @@ def latest_model_signal(
     )
     forest.fit(x_train, y_train)
     prob_up = float(forest.predict_proba(x_live)[0])
-    if prob_up >= enter_threshold:
-        action = "LONG"
-    elif prob_up <= exit_threshold:
-        action = "CASH"
-    else:
-        action = "HOLD_EXISTING_POSITION"
+    confidence = confidence_band(prob_up, enter_threshold, exit_threshold)
 
     return {
         "as_of_date": str(latest.iloc[0]["Date"].date()),
         "close": float(latest.iloc[0]["Close"]),
         "probability_next_day_up": prob_up,
-        "standalone_action": action,
+        "standalone_action": confidence["action"],
+        "confidence_label": confidence["label"],
+        "confidence_margin": confidence["margin"],
+        "distance_from_entry": confidence["distance_from_entry"],
+        "distance_from_exit": confidence["distance_from_exit"],
         "entry_threshold": enter_threshold,
         "exit_threshold": exit_threshold,
         "note": "Standalone action does not know your current portfolio position.",
@@ -624,6 +889,15 @@ def main() -> None:
         random_state=args.random_state,
     )
     sensitivity = threshold_sensitivity(predictions, fee_bps=args.fee_bps)
+    daily_archive = build_daily_signal_archive(
+        bt,
+        live_features,
+        enter_threshold=args.enter_threshold,
+        exit_threshold=args.exit_threshold,
+    )
+    trade_journal = build_trade_journal(bt, fee_bps=args.fee_bps)
+    latest_regime = classify_market_regime(live_features.iloc[-1], live_features)
+    context_features = latest_feature_context(live_features, live_features, importances)
 
     metrics = {
         "input_file": str(args.input),
@@ -651,6 +925,8 @@ def main() -> None:
         "buy_and_hold": trading_metrics(bt, "buyhold_return", "buyhold_equity"),
         "trades": trade_summary(bt),
         "latest_signal": live_signal,
+        "latest_market_regime": latest_regime,
+        "latest_feature_context": context_features,
         "best_threshold_sensitivity": sensitivity.head(5).to_dict(orient="records"),
         "top_features": importances.head(12).to_dict(orient="records"),
     }
@@ -658,10 +934,14 @@ def main() -> None:
     equity_path = args.output_dir / "kaspa_rf_equity_curve.csv"
     importance_path = args.output_dir / "kaspa_rf_feature_importance.csv"
     sensitivity_path = args.output_dir / "kaspa_rf_threshold_sensitivity.csv"
+    trade_journal_path = args.output_dir / "kaspa_rf_trade_journal.csv"
+    daily_archive_path = args.output_dir / "kaspa_rf_daily_signal_archive.csv"
     metrics_path = args.output_dir / "kaspa_rf_metrics.json"
     bt.to_csv(equity_path, index=False)
     importances.to_csv(importance_path, index=False)
     sensitivity.to_csv(sensitivity_path, index=False)
+    trade_journal.to_csv(trade_journal_path, index=False)
+    daily_archive.to_csv(daily_archive_path, index=False)
     metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     chart_path = maybe_write_chart(bt, args.output_dir)
     if chart_path:
